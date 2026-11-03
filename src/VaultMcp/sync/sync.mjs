@@ -24,7 +24,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { parseAllowList, computeExclusions, parseSeed, toSyncArgument, FILE_NAME } from './exclusions.mjs';
+import { parseAllowList, computeExclusions, parseSeed, toSyncArgument, mergeExclusions, FILE_NAME } from './exclusions.mjs';
 import { hasStoredLogin, readToken } from './login-state.mjs';
 
 const env = process.env;
@@ -41,6 +41,8 @@ const once = process.argv.includes('--once');
 // again and the allow-listed folders are pulled again), which is cheap for a pull-only copy.
 const loginHome = path.join(statePath, '.config');
 const workHome = env.SYNC_WORK_PATH || '/tmp/obsidian-headless-work';
+// Every folder ever kept out, on the share so a restart remembers it. Only ever added to the exclusions, never used to skip them.
+const knownFile = path.join(statePath, 'excluded-folders.txt');
 fs.mkdirSync(workHome, { recursive: true, mode: 0o700 });
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -147,15 +149,20 @@ function listFolders(relative) {
   } catch { return []; }
 }
 
+function readKnown() {
+  try { return fs.readFileSync(knownFile, 'utf8').split('\n').map(l => l.trim()).filter(Boolean); } catch { return []; }
+}
+
 /** The exclusion list for this cycle, or null when nothing allows a safe sync yet. */
 function desiredExclusions() {
   const note = path.join(vaultPath, FILE_NAME);
+  const seed = parseSeed(env.SYNC_EXCLUDE_SEED);
+  const known = readKnown();
   if (fs.existsSync(note)) {
     const allow = parseAllowList(fs.readFileSync(note, 'utf8'));
-    return { source: FILE_NAME, allow, excluded: computeExclusions(allow, listFolders) };
+    return { source: FILE_NAME, allow, excluded: mergeExclusions(computeExclusions(allow, listFolders), seed, known, allow) };
   }
-  const seed = parseSeed(env.SYNC_EXCLUDE_SEED);
-  if (seed.length > 0) return { source: 'SYNC_EXCLUDE_SEED', allow: [], excluded: seed };
+  if (seed.length > 0) return { source: 'SYNC_EXCLUDE_SEED', allow: [], excluded: mergeExclusions([], seed, known, []) };
   return null;
 }
 
@@ -176,6 +183,7 @@ function applyExclusions(excluded) {
   const r = ob(['sync-config', '--path', vaultPath, '--excluded-folders', argument, '--json']);
   if (!r.ok) { log('sync-config --excluded-folders failed:', firstError(r)); return false; }
   if (heldExclusions() !== wanted) { log('refusing to sync: the client does not hold the exclusions just applied'); return false; }
+  fs.writeFileSync(knownFile, [...new Set([...readKnown(), ...excluded])].sort().join('\n') + '\n');
   log(`exclusions applied (${excluded.length}):`, excluded.join(', ') || '(none)');
   return true;
 }
@@ -206,6 +214,15 @@ async function cycle() {
   const s = ob(['sync', '--path', vaultPath]);
   if (!s.ok) { log('sync failed:', firstError(s)); return false; }
   log(`synced; exclusions from ${desired.source}; allowed folders: ${desired.allow.join(', ') || '(none yet)'}`);
+  // A folder that is new on the remote arrives with this sync (Sync can only exclude what it is told about). Exclude and remove
+  // it now rather than a cycle later, so it stays on the share for seconds, not a minute.
+  const after = desiredExclusions();
+  if (after && after.excluded.join(',') !== desired.excluded.join(',')) {
+    log('new folders outside the allow-list arrived:', after.excluded.filter(f => !desired.excluded.includes(f)).join(', '));
+    if (!applyExclusions(after.excluded)) return false;
+    if (prune) pruneExcluded(after.excluded);
+    return true;
+  }
   if (prune) pruneExcluded(desired.excluded);
   return true;
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAllowList, computeExclusions, parseSeed, toSyncArgument, normalizeFolder } from './exclusions.mjs';
+import { parseAllowList, computeExclusions, parseSeed, toSyncArgument, normalizeFolder, mergeExclusions } from './exclusions.mjs';
 
 const tree = {
   '': ['Work', 'Projects', 'Personal', 'Journal', '.obsidian', '.trash'],
@@ -41,4 +41,18 @@ test('the seed is a top-level list and the Sync argument is comma-joined', () =>
   assert.deepEqual(parseSeed(' Personal, Journal ,,Journal,.obsidian'), ['Personal', 'Journal']);
   assert.equal(toSyncArgument(['Journal', 'Projects/Home']), 'Journal,Projects/Home');
   assert.throws(() => toSyncArgument(['a,b']), /comma/);
+});
+
+test('a pruned private folder stays excluded: the seed and earlier exclusions survive its local copy being gone', () => {
+  // The first real deployment: allow ADR, seed Private. Private is pruned, so the local listing no longer shows it.
+  assert.deepEqual(mergeExclusions([], ['Private'], [], ['ADR']), ['Private']);
+  assert.deepEqual(mergeExclusions([], [], ['Private'], ['ADR']), ['Private']);
+  assert.deepEqual(mergeExclusions(['Journal'], ['Private'], ['Private'], ['ADR']), ['Journal', 'Private']);
+});
+
+test('an earlier exclusion is dropped once the allow-list covers it, holds it, or lies below it', () => {
+  assert.deepEqual(mergeExclusions([], [], ['Private'], ['Private']), []);
+  assert.deepEqual(mergeExclusions([], [], ['Projects/Home'], ['Projects']), []);
+  assert.deepEqual(mergeExclusions([], [], ['Projects'], ['Projects/Cloud']), []);
+  assert.deepEqual(mergeExclusions([], [], ['Private', 'Projects'], ['Projects/Cloud']), ['Private']);
 });
