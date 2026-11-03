@@ -6,6 +6,10 @@
 #   Examples.cs 11 and docs/03-mcp-contracts.md 2698 (generated from it): sample idempotencyKey in a tool example.
 #   UploadAndSafetyTests.cs 60-61: deliberate fake secrets for the secret-scanner test (truncated PEM, AWS's documented
 #   AKIAIOSFODNN7EXAMPLE, placeholder-patterned Stripe/GitHub tokens).
+#   Found by the first full-history run (workflow_dispatch, 2026-11-03), same kind: deliberate fake secrets that tests feed to the
+#   redaction and secret scanners, every one the alphabet pattern "...ghijklmnopqrstuvwxyz0123456789":
+#   SecurityTests.cs 12 (storage AccountKey), UploadAndSafetyTests.cs 59 and 181 (AccountKey) and 61 (GitHub token pattern),
+#   LegacyImportTests.cs 282 and 294 (GitHub token pattern in an ADR the import must block).
 e2c954782fe57333c05bf8dde3cd4e753aa0117e:infra/modules/rbac.bicep:generic-api-key:21
 e2c954782fe57333c05bf8dde3cd4e753aa0117e:infra/modules/rbac.bicep:generic-api-key:22
 e2c954782fe57333c05bf8dde3cd4e753aa0117e:src/AdrMcp.Application/Common/SensitiveDataRedactor.cs:private-key:20
@@ -14,3 +18,9 @@ e2c954782fe57333c05bf8dde3cd4e753aa0117e:tools/AdrMcp.DocGen/Examples.cs:generic
 e2c954782fe57333c05bf8dde3cd4e753aa0117e:docs/03-mcp-contracts.md:generic-api-key:2698
 e2c954782fe57333c05bf8dde3cd4e753aa0117e:tests/AdrMcp.UnitTests/Application/UploadAndSafetyTests.cs:private-key:60
 e2c954782fe57333c05bf8dde3cd4e753aa0117e:tests/AdrMcp.UnitTests/Application/UploadAndSafetyTests.cs:stripe-access-token:61
+e2c954782fe57333c05bf8dde3cd4e753aa0117e:tests/AdrMcp.UnitTests/Application/SecurityTests.cs:generic-api-key:12
+e2c954782fe57333c05bf8dde3cd4e753aa0117e:tests/AdrMcp.UnitTests/Application/UploadAndSafetyTests.cs:generic-api-key:59
+e2c954782fe57333c05bf8dde3cd4e753aa0117e:tests/AdrMcp.UnitTests/Application/UploadAndSafetyTests.cs:generic-api-key:181
+e2c954782fe57333c05bf8dde3cd4e753aa0117e:tests/AdrMcp.UnitTests/Application/UploadAndSafetyTests.cs:github-pat:61
+294effccf0f9a9bacde9ab7b321af789d616f3e8:tests/AdrMcp.UnitTests/Application/LegacyImportTests.cs:github-pat:282
+294effccf0f9a9bacde9ab7b321af789d616f3e8:tests/AdrMcp.UnitTests/Application/LegacyImportTests.cs:github-pat:294
