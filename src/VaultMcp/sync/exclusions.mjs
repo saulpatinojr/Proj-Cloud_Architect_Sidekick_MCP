@@ -75,4 +75,15 @@ export function toSyncArgument(folders) {
   return folders.join(',');
 }
 
+/**
+ * The exclusion list for one cycle. `local` is computeExclusions over the folders on the share, which cannot see a private folder
+ * once its local copy has been pruned, so on its own it un-excludes that folder every other cycle and Sync pulls it back (seen on
+ * the first real deployment: Private flapped in and out each minute). The seed and every folder kept out before stay excluded
+ * until the allow-list covers them: an entry is dropped only when it is allowed, lies inside an allowed folder, or holds one.
+ */
+export function mergeExclusions(local, seed, known, allow) {
+  const covered = f => allow.some(a => a === f || a.startsWith(f + '/') || f.startsWith(a + '/'));
+  return [...new Set([...local, ...seed, ...known])].filter(f => !covered(f)).sort();
+}
+
 export { FILE_NAME };
