@@ -130,14 +130,40 @@ function Set-ServerApp([string]$DisplayName, [string]$RolesFile, [string]$Scopes
         Write-Host '    created app registration'
     } else {
         $appId = $app.appId
-        # Re-applying the file keeps existing roles and adds new ones (Entra refuses to drop an enabled role; the files never drop one).
-        az ad app update --id $appId --sign-in-audience AzureADMyOrg --requested-access-token-version 2 --app-roles "@$rolesPath"; Assert-Ok 'az ad app update'
-        Write-Host '    app registration exists; roles and token version applied'
+        # An existing app keeps its own role and scope ids: role assignments and client consents point at them, and Entra refuses
+        # to change an enabled role's id. Only roles whose value is missing are added, with the file's id. (A live app made outside
+        # this script had other ids than the files; re-applying the files would have failed or broken every assignment.)
+        $liveRoles = @(Get-Field $app 'appRoles')
+        $liveValues = @($liveRoles | ForEach-Object { $_.value })
+        $addRoles = @($roles | Where-Object { $liveValues -notcontains $_.value })
+        if ($addRoles.Count) {
+            $keep = @($liveRoles | ForEach-Object { [ordered]@{ allowedMemberTypes = @($_.allowedMemberTypes); description = $_.description; displayName = $_.displayName; id = $_.id; isEnabled = $_.isEnabled; value = $_.value } })
+            $merged = @($keep) + @($addRoles)
+            $file = Write-WorkFile "roles-$appId.json" (ConvertTo-Json -InputObject $merged -Depth 6)
+            az ad app update --id $appId --app-roles "@$file"; Assert-Ok 'az ad app update --app-roles'
+            Write-Host "    app registration exists; added role(s) $(@($addRoles | ForEach-Object { $_.value }) -join ', '), kept $($liveRoles.Count) existing"
+        } else {
+            Write-Host "    app registration exists; its $($liveRoles.Count) role(s) kept as they are"
+        }
+        az ad app update --id $appId --sign-in-audience AzureADMyOrg --requested-access-token-version 2; Assert-Ok 'az ad app update'
+        $roles = @($liveRoles) + @($addRoles)
     }
     $objectId = az ad app show --id $appId --query id -o tsv; Assert-Ok 'az ad app show'
 
-    # The delegated scope. PATCH sets the collection; the file holds the same id on every run, so this is idempotent.
-    az rest --method PATCH --uri "$Graph/applications/$objectId" --headers 'Content-Type=application/json' --body "@$scopesPath"; Assert-Ok 'az rest PATCH oauth2PermissionScopes'
+    # The delegated scope. An existing scope of the same value is kept with its id (clients consented to that id); a missing one is
+    # added next to whatever scopes the app already has.
+    $liveApi = Get-Field (ConvertFrom-CliJson (az ad app show --id $appId -o json)) 'api'
+    $liveScopes = @(Get-Field $liveApi 'oauth2PermissionScopes')
+    $scope = @($liveScopes | Where-Object { $_.value -eq $scopes[0].value })
+    if ($scope.Count) {
+        $scopes = @($scope[0])
+        Write-Host "    scope $($scopes[0].value) exists; kept"
+    } else {
+        $body = @{ api = @{ oauth2PermissionScopes = @($liveScopes) + @($scopes) } } | ConvertTo-Json -Depth 8
+        $file = Write-WorkFile "scopes-$appId.json" $body
+        az rest --method PATCH --uri "$Graph/applications/$objectId" --headers 'Content-Type=application/json' --body "@$file"; Assert-Ok 'az rest PATCH oauth2PermissionScopes'
+        Write-Host "    scope $($scopes[0].value) added"
+    }
 
     # Identifier URIs: api://<client id> always; the MCP URL when given, because clients send it as the OAuth resource (RFC 8707)
     # and Entra issues a token only for a registered Application ID URI (AADSTS9010010 otherwise).
@@ -205,8 +231,17 @@ function Set-ConfidentialClient([string]$DisplayName) {
 
 # Pre-authorizes the client apps on a server's scope (no consent prompt). PATCH replaces the list, so it is built in full each run.
 function Set-PreAuthorization($Server, [string[]]$ClientAppIds) {
-    $entries = @($ClientAppIds | Where-Object { $_ } | Select-Object -Unique | ForEach-Object { @{ appId = $_; delegatedPermissionIds = @($Server.ScopeId) } })
-    $body = @{ api = @{ preAuthorizedApplications = $entries } } | ConvertTo-Json -Depth 6 -Compress
+    # Adds to what the app already trusts; never drops a client that is pre-authorized today (a live app had one this script did not
+    # know). PATCH replaces the list, so it is built from the live list plus the wanted clients.
+    $live = @(Get-Field (Get-Field (ConvertFrom-CliJson (az ad app show --id $Server.AppId -o json)) 'api') 'preAuthorizedApplications')
+    $entries = [System.Collections.Generic.List[object]]::new()
+    foreach ($e in $live) { $entries.Add(@{ appId = $e.appId; delegatedPermissionIds = @($e.delegatedPermissionIds) }) }
+    foreach ($id in @($ClientAppIds | Where-Object { $_ } | Select-Object -Unique)) {
+        $have = @($entries | Where-Object { $_.appId -eq $id })
+        if ($have.Count) { if ($have[0].delegatedPermissionIds -notcontains $Server.ScopeId) { $have[0].delegatedPermissionIds = @($have[0].delegatedPermissionIds) + $Server.ScopeId } }
+        else { $entries.Add(@{ appId = $id; delegatedPermissionIds = @($Server.ScopeId) }) }
+    }
+    $body = @{ api = @{ preAuthorizedApplications = @($entries) } } | ConvertTo-Json -Depth 6 -Compress
     $file = Write-WorkFile "preauth-$($Server.AppId).json" $body
     az rest --method PATCH --uri "$Graph/applications/$($Server.ObjectId)" --headers 'Content-Type=application/json' --body "@$file"; Assert-Ok 'az rest PATCH preAuthorizedApplications'
     Write-Host "    pre-authorized $($entries.Count) client app(s) on $($Server.Scope)"
@@ -237,9 +272,9 @@ function Test-ServerApp($Server, [string[]]$ExpectedClients, [hashtable]$Expecte
     $a = ConvertFrom-CliJson (az ad app show --id $Server.AppId -o json); Assert-Ok 'az ad app show'
     $roles = @($a.appRoles | ForEach-Object { $_.value } | Sort-Object)
     $wantRoles = @($Server.RoleValues | Sort-Object)
-    if (($roles -join ',') -eq ($wantRoles -join ',')) { Write-Host "  PASS $($Server.Name): app roles $($roles -join ', ')" } else { $Failures.Add("$($Server.Name): app roles are $($roles -join ', '), expected $($wantRoles -join ', ')") }
+    if (@($wantRoles | Where-Object { $roles -notcontains $_ }).Count -eq 0) { Write-Host "  PASS $($Server.Name): app roles $($roles -join ', ')" } else { $Failures.Add("$($Server.Name): app roles are $($roles -join ', '), expected $($wantRoles -join ', ')") }
     $scopes = @($a.api.oauth2PermissionScopes | ForEach-Object { $_.value })
-    if ($scopes.Count -eq 1 -and $scopes[0] -eq $Server.Scope) { Write-Host "  PASS $($Server.Name): scope $($Server.Scope)" } else { $Failures.Add("$($Server.Name): scopes are $($scopes -join ', '), expected $($Server.Scope)") }
+    if ($scopes -contains $Server.Scope) { Write-Host "  PASS $($Server.Name): scope $($Server.Scope)" } else { $Failures.Add("$($Server.Name): scopes are $($scopes -join ', '), expected $($Server.Scope)") }
     if (@($roles | Where-Object { $scopes -contains $_ }).Count) { $Failures.Add("$($Server.Name): a role value equals a scope value (Entra keeps both in one collection)") }
     if ("$($a.api.requestedAccessTokenVersion)" -eq '2') { Write-Host "  PASS $($Server.Name): v2.0 tokens" } else { $Failures.Add("$($Server.Name): requestedAccessTokenVersion is not 2") }
     $uris = @($a.identifierUris)
@@ -247,9 +282,10 @@ function Test-ServerApp($Server, [string[]]$ExpectedClients, [hashtable]$Expecte
     if ($Server.McpUrl) {
         if ($uris -contains $Server.McpUrl.TrimEnd('/')) { Write-Host "  PASS $($Server.Name): identifier URI for the MCP URL" } else { $Failures.Add("$($Server.Name): the MCP URL is not an identifier URI (see the note above about verified domains)") }
     }
-    $pre = @($a.api.preAuthorizedApplications | ForEach-Object { $_.appId } | Sort-Object)
-    $wantPre = @($ExpectedClients | Where-Object { $_ } | Select-Object -Unique | Sort-Object)
-    if (($pre -join ',') -eq ($wantPre -join ',')) { Write-Host "  PASS $($Server.Name): pre-authorized clients ($($pre.Count))" } else { $Failures.Add("$($Server.Name): pre-authorized clients are $($pre -join ', '), expected $($wantPre -join ', ')") }
+    $pre = @($a.api.preAuthorizedApplications | Where-Object { @($_.delegatedPermissionIds) -contains $Server.ScopeId } | ForEach-Object { $_.appId })
+    $wantPre = @($ExpectedClients | Where-Object { $_ } | Select-Object -Unique)
+    $absent = @($wantPre | Where-Object { $pre -notcontains $_ })
+    if ($absent.Count -eq 0) { Write-Host "  PASS $($Server.Name): pre-authorized clients ($($wantPre.Count) wanted, $($pre.Count) in all)" } else { $Failures.Add("$($Server.Name): $($absent.Count) wanted client(s) are not pre-authorized on $($Server.Scope)") }
     $required = az ad sp show --id $Server.SpId --query appRoleAssignmentRequired -o tsv; Assert-Ok 'az ad sp show'
     if ("$required" -eq 'true') { Write-Host "  PASS $($Server.Name): assignment required" } else { $Failures.Add("$($Server.Name): appRoleAssignmentRequired is not true") }
     $assignments = @(Get-RoleAssignmentList $Server.SpId)
